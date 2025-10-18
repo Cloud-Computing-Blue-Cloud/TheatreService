@@ -17,6 +17,7 @@ from models.screen import ScreenCreate, ScreenRead, ScreenUpdate
 from models.movie import MovieCreate, MovieRead, MovieUpdate
 from models.showtime import ShowtimeCreate, ShowtimeRead, ShowtimeUpdate
 from models.health import Health
+from models.theatreDataService import TheatreDataService
 
 port = int(os.environ.get("FASTAPIPORT", 8001))
 
@@ -85,16 +86,26 @@ def list_theatres(
     country: Optional[str] = Query(None, description="Filter by country"),
 ):
     """List all theatres with optional filtering."""
-    items = list(theatres.values())
-    if name is not None:
-        items = [t for t in items if t.name.lower() == name.lower()]
-    if city is not None:
-        items = [t for t in items if t.city.lower() == city.lower()]
-    if state is not None:
-        items = [t for t in items if t.state.lower() == state.lower()]
-    if country is not None:
-        items = [t for t in items if t.country.lower() == country.lower()]
-    return items
+    items = TheatreDataService().get_all_theatres()
+    ans=[]
+    for item in items:
+        obj = {}
+        obj['id'] = "99999999-9999-4999-8999-999999999999"
+        obj['name'] = item['name']
+        obj['address'] = item['address']
+        obj['city'] = ""
+        obj['state'] = ""
+        obj['postal_code'] = ""
+        obj['country'] = ""
+        obj['phone'] = ""
+        obj['email'] = "a@b.com"
+        obj['capacity'] = 60
+        obj['created_at'] = item['created_at'].isoformat() + "Z"
+        obj['updated_at'] = item['updated_at'].isoformat() + "Z"
+
+        ans.append(obj)
+    
+    return ans
 
 @app.get("/theatres/{theatre_id}", response_model=TheatreRead)
 def get_theatre(theatre_id: UUID):
