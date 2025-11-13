@@ -7,6 +7,10 @@ from datetime import datetime
 from typing import Dict, List
 from uuid import UUID
 
+import hashlib, json
+from json import JSONEncoder
+
+from fastapi import Header
 from fastapi import FastAPI, HTTPException
 from fastapi import Query, Path
 from typing import Optional
@@ -49,6 +53,28 @@ def make_health(echo: Optional[str], path_echo: Optional[str]=None) -> Health:
         path_echo=path_echo
     )
 
+class PydanticJSONEncoder(JSONEncoder):
+    """Custom JSON encoder for Pydantic models with datetime and UUID support."""
+    def default(self, o):
+        if isinstance(o, datetime):
+            return o.isoformat() + "Z"
+        if isinstance(o, UUID):
+            return str(o)
+        return super().default(o)
+
+def _calc_etag(obj) -> str:
+    """
+    Strong ETag: SHA-256 of the JSON payload (stable keys, no spaces).
+    Returns a quoted value like "c0ffee...".
+    """
+    payload = json.dumps(
+        obj.model_dump(exclude_none=True),
+        sort_keys=True,
+        separators=(",", ":"),
+        cls=PydanticJSONEncoder,
+    ).encode("utf-8")
+    return f"\"{hashlib.sha256(payload).hexdigest()}\""
+
 @app.get("/health", response_model=Health)
 def get_health_no_path(echo: str | None = Query(None, description="Optional echo string")):
     return make_health(echo=echo, path_echo=None)
@@ -72,10 +98,10 @@ def favicon():
 # -----------------------------------------------------------------------------
 
 @app.post("/theatres", response_model=TheatreRead, status_code=201)
-def create_theatre(theatre: TheatreCreate):
-    """Create a new theatre."""
+def create_theatre(theatre: TheatreCreate, response: Response):
     new_theatre = TheatreRead(**theatre.model_dump())
     theatres[new_theatre.id] = new_theatre
+    response.headers["ETag"] = _calc_etag(new_theatre)
     return new_theatre
 
 @app.get("/theatres", response_model=List[TheatreRead])
@@ -108,6 +134,25 @@ def list_theatres(
     return ans
 
 @app.get("/theatres/{theatre_id}", response_model=TheatreRead)
+def get_theatre(
+    theatre_id: UUID,
+    response: Response,
+    if_none_match: Optional[str] = Header(None)  # maps to "If-None-Match"
+):
+    item = theatres.get(theatre_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Theatre not found")
+
+    etag = _calc_etag(item)
+    # If client's cached version matches, say "Not Modified"
+    if if_none_match == etag:
+        # Best practice: still echo current ETag in 304
+        return Response(status_code=304, headers={"ETag": etag})
+
+    response.headers["ETag"] = etag
+    return item
+
+@app.get("/theatres/{theatre_id}", response_model=TheatreRead)
 def get_theatre(theatre_id: UUID):
     """Get a specific theatre by ID."""
     item = theatres.get(theatre_id)
@@ -121,17 +166,50 @@ def update_theatre(theatre_id: UUID, update: TheatreUpdate):
     return HTTPException(status_code=501, detail="NOT IMPLEMENTED")
 
 @app.put("/theatres/{theatre_id}", response_model=TheatreRead)
-def replace_theatre(theatre_id: UUID, theatre: TheatreCreate):
-    """Replace entire theatre resource (PUT - complete replacement)."""
-    return HTTPException(status_code=501, detail="NOT IMPLEMENTED")
+def replace_theatre(
+    theatre_id: UUID,
+    theatre: TheatreCreate,
+    response: Response,
+    if_match: Optional[str] = Header(None)  # maps to "If-Match"
+):
+    existing = theatres.get(theatre_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Theatre not found")
+
+    current_etag = _calc_etag(existing)
+
+    # Enforce optimistic concurrency: require If-Match and it must match
+    if if_match is None:
+        raise HTTPException(status_code=428, detail="Precondition Required: missing If-Match")
+    if if_match != current_etag:
+        raise HTTPException(status_code=412, detail="Precondition Failed: ETag mismatch")
+
+    # Replace entire resource; keep the same id; update timestamps if your model has them
+    replacement = TheatreRead(id=theatre_id, **theatre.model_dump())
+    theatres[theatre_id] = replacement
+
+    new_etag = _calc_etag(replacement)
+    response.headers["ETag"] = new_etag
+    return replacement
+
 
 @app.delete("/theatres/{theatre_id}")
-def delete_theatre(theatre_id: UUID):
-    """Delete a theatre resource."""
-    if theatre_id not in theatres:
+def delete_theatre(
+    theatre_id: UUID,
+    if_match: Optional[str] = Header(None)
+):
+    existing = theatres.get(theatre_id)
+    if existing is None:
         raise HTTPException(status_code=404, detail="Theatre not found")
+
+    current_etag = _calc_etag(existing)
+    # If you want protection: only delete if client proves it has the latest
+    if if_match is not None and if_match != current_etag:
+        raise HTTPException(status_code=412, detail="Precondition Failed: ETag mismatch")
+
     del theatres[theatre_id]
     return {"status": "deleted", "id": str(theatre_id)}
+
 
 # -----------------------------------------------------------------------------
 # Screen endpoints
@@ -170,46 +248,6 @@ def replace_screen(screen_id: UUID, screen: ScreenCreate):
 @app.delete("/screens/{screen_id}")
 def delete_screen(screen_id: UUID):
     """Delete a screen resource."""
-    return HTTPException(status_code=501, detail="NOT IMPLEMENTED")
-
-# -----------------------------------------------------------------------------
-# Movie endpoints
-# -----------------------------------------------------------------------------
-
-@app.post("/movies", response_model=MovieRead, status_code=201)
-def create_movie(movie: MovieCreate):
-    """Create a new movie."""
-    return HTTPException(status_code=501, detail="NOT IMPLEMENTED")
-
-@app.get("/movies", response_model=List[MovieRead])
-def list_movies(
-    title: Optional[str] = Query(None, description="Filter by movie title"),
-    genre: Optional[str] = Query(None, description="Filter by genre"),
-    rating: Optional[str] = Query(None, description="Filter by rating"),
-    director: Optional[str] = Query(None, description="Filter by director"),
-    is_active: Optional[bool] = Query(None, description="Filter by active status"),
-):
-    """List all movies with optional filtering."""
-    return HTTPException(status_code=501, detail="NOT IMPLEMENTED")
-
-@app.get("/movies/{movie_id}", response_model=MovieRead)
-def get_movie(movie_id: UUID):
-    """Get a specific movie by ID."""
-    return HTTPException(status_code=501, detail="NOT IMPLEMENTED")
-
-@app.patch("/movies/{movie_id}", response_model=MovieRead)
-def update_movie(movie_id: UUID, update: MovieUpdate):
-    """Update a movie (partial update)."""
-    return HTTPException(status_code=501, detail="NOT IMPLEMENTED")
-
-@app.put("/movies/{movie_id}", response_model=MovieRead)
-def replace_movie(movie_id: UUID, movie: MovieCreate):
-    """Replace entire movie resource (PUT - complete replacement)."""
-    return HTTPException(status_code=501, detail="NOT IMPLEMENTED")
-
-@app.delete("/movies/{movie_id}")
-def delete_movie(movie_id: UUID):
-    """Delete a movie resource."""
     return HTTPException(status_code=501, detail="NOT IMPLEMENTED")
 
 # -----------------------------------------------------------------------------
