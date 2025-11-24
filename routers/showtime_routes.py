@@ -312,7 +312,7 @@ def update_seat_count(
     if not screen_data:
         raise HTTPException(status_code=404, detail="Screen not found for this showtime")
     
-    total_seats = screen_data['num_rows'] * screen_data['num_cols']
+    total_seats = screen_data.num_rows * screen_data.num_cols
     new_booked_count = showtime.seats_booked + seat_update.count
     
     # Validate seat count
